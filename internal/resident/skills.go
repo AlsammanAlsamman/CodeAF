@@ -175,6 +175,9 @@ func installSkillTrial(ctx context.Context, root string, candidate store.Fact, j
 	if err := runSkillCheck(ctx, staging); err != nil {
 		return "", err
 	}
+	if err := runSkillStones(ctx, staging); err != nil {
+		return "", err
+	}
 	if _, err := skillExecutable(staging); err != nil {
 		return "", fmt.Errorf("check.sh removed the skill executable: %w", err)
 	}
@@ -276,13 +279,17 @@ func runSkillCheck(ctx context.Context, skillDir string) error {
 		return fmt.Errorf("create clean check directory: %w", err)
 	}
 	defer os.RemoveAll(clean)
+	return runSkillCheckIn(ctx, skillDir, clean, nil)
+}
 
+func runSkillCheckIn(ctx context.Context, skillDir, cwd string, extraEnv []string) error {
 	trialCtx, cancel := context.WithTimeout(ctx, skillTrialTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(trialCtx, filepath.Join(skillDir, "check.sh"))
-	cmd.Dir = clean
+	cmd.Dir = cwd
 	const skillDirEnv = "CODEAF_SKILL_DIR"
 	cmd.Env = append(os.Environ(), skillDirEnv+"="+skillDir, env.Legacy(skillDirEnv)+"="+skillDir)
+	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.WaitDelay = time.Second
 	output, runErr := cmd.CombinedOutput()
 	if trialCtx.Err() == context.DeadlineExceeded {
@@ -292,6 +299,83 @@ func runSkillCheck(ctx context.Context, skillDir string) error {
 		return fmt.Errorf("check.sh failed: %v: %s", runErr, boundedSkillOutput(output))
 	}
 	return nil
+}
+
+// runSkillStones is the trial's QC round, run only once the base check has
+// already gone green. A candidate's own check.sh is written by whatever
+// taught it the skill — it proves the happy path, nothing more. These stones
+// are external and adversarial: each re-runs the same check.sh under a
+// condition its author never wrote it for, on the same principle SkillJab
+// (github.com/AlsammanAlsamman/skilljab) applies to data pipelines — plant
+// nothing new, just stop trusting a check that has only ever run once, in
+// one pristine directory it will never see again in the wild. A green base
+// check that goes red under a stone is a silent failure the author's own
+// check could never have caught; it supersedes the candidate with the stone
+// that caught it as evidence, the same way any other red check does.
+func runSkillStones(ctx context.Context, skillDir string) error {
+	stones := []struct {
+		name string
+		run  func(context.Context, string) error
+	}{
+		{"reused directory", skillStoneReusedDir},
+		{"pre-existing files", skillStoneDirtyWorkspace},
+		{"unrelated environment noise", skillStoneEnvNoise},
+	}
+	for _, stone := range stones {
+		if err := stone.run(ctx, skillDir); err != nil {
+			return fmt.Errorf("stone %q: %w", stone.name, err)
+		}
+	}
+	return nil
+}
+
+// skillStoneReusedDir catches a check that only works once — a lockfile it
+// never cleans up, a directory it assumes doesn't exist yet, output it
+// appends to without checking. The resident's real ticks never hand a skill
+// a directory it hasn't already touched; a check that requires one is
+// already broken on the second run nobody will notice failed.
+func skillStoneReusedDir(ctx context.Context, skillDir string) error {
+	clean, err := os.MkdirTemp("", "codeaf-skill-stone-")
+	if err != nil {
+		return fmt.Errorf("create stone directory: %w", err)
+	}
+	defer os.RemoveAll(clean)
+	if err := runSkillCheckIn(ctx, skillDir, clean, nil); err != nil {
+		return err
+	}
+	return runSkillCheckIn(ctx, skillDir, clean, nil)
+}
+
+// skillStoneDirtyWorkspace catches a check that silently assumes an empty
+// directory — counting entries, globbing everything present, or writing a
+// name that happens not to collide only because nothing else was there.
+func skillStoneDirtyWorkspace(ctx context.Context, skillDir string) error {
+	clean, err := os.MkdirTemp("", "codeaf-skill-stone-")
+	if err != nil {
+		return fmt.Errorf("create stone directory: %w", err)
+	}
+	defer os.RemoveAll(clean)
+	decoys := []string{"notes.txt", ".leftover", "output"}
+	for _, name := range decoys {
+		if err := os.WriteFile(filepath.Join(clean, name), []byte("decoy"), 0o644); err != nil {
+			return fmt.Errorf("seed decoy file %q: %w", name, err)
+		}
+	}
+	return runSkillCheckIn(ctx, skillDir, clean, nil)
+}
+
+// skillStoneEnvNoise catches a check that only passes in the resident's own
+// process environment — reading a variable a real shell session sets and
+// codeaf's own trial happens not to, or breaking when one it doesn't expect
+// is present.
+func skillStoneEnvNoise(ctx context.Context, skillDir string) error {
+	clean, err := os.MkdirTemp("", "codeaf-skill-stone-")
+	if err != nil {
+		return fmt.Errorf("create stone directory: %w", err)
+	}
+	defer os.RemoveAll(clean)
+	noise := []string{"CI=true", "LC_ALL=C", "TZ=UTC"}
+	return runSkillCheckIn(ctx, skillDir, clean, noise)
 }
 
 func boundedSkillOutput(output []byte) string {

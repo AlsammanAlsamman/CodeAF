@@ -180,6 +180,73 @@ exit 9
 	}
 }
 
+// A check.sh that only passes once — here, because it refuses to run in a
+// directory it has already left a marker in — is exactly the silent failure
+// the base trial (green, once, in a fresh directory) cannot see for itself.
+func TestRecurringSkillRejectsACheckThatOnlyPassesOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	graph := openStore(t)
+	notIdempotent := `#!/bin/sh
+set -eu
+test ! -f ./already-ran
+touch ./already-ran
+`
+	recordCandidateJob(t, graph, "job-first", writeSkillArtifact(t, "repo-audit", notIdempotent))
+	recordCandidateJob(t, graph, "job-second", writeSkillArtifact(t, "repo-audit", notIdempotent))
+
+	reconciler := New(graph, nil, nil)
+	if err := reconciler.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if active, err := graph.SkillFacts(store.FactActive, 10); err != nil || len(active) != 0 {
+		t.Fatalf("non-idempotent check activated a skill: %+v err=%v", active, err)
+	}
+	retired, err := graph.SkillFacts(store.FactSuperseded, 10)
+	if err != nil || len(retired) != 2 {
+		t.Fatalf("retired candidates = %+v err=%v", retired, err)
+	}
+	for _, fact := range retired {
+		if !strings.Contains(fact.StatusNote, `stone "reused directory"`) {
+			t.Fatalf("candidate #%d failure evidence = %q, want the stone named", fact.Seq, fact.StatusNote)
+		}
+	}
+}
+
+// A check.sh that only passes against an empty directory — here, by counting
+// every entry present — has proven nothing about a real, already-lived-in
+// workspace, which is what the resident actually hands a skill.
+func TestRecurringSkillRejectsACheckThatAssumesAnEmptyWorkspace(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	graph := openStore(t)
+	assumesEmpty := `#!/bin/sh
+set -eu
+[ -z "$(ls -A .)" ]
+`
+	recordCandidateJob(t, graph, "job-first", writeSkillArtifact(t, "repo-audit", assumesEmpty))
+	recordCandidateJob(t, graph, "job-second", writeSkillArtifact(t, "repo-audit", assumesEmpty))
+
+	reconciler := New(graph, nil, nil)
+	if err := reconciler.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if active, err := graph.SkillFacts(store.FactActive, 10); err != nil || len(active) != 0 {
+		t.Fatalf("empty-workspace check activated a skill: %+v err=%v", active, err)
+	}
+	retired, err := graph.SkillFacts(store.FactSuperseded, 10)
+	if err != nil || len(retired) != 2 {
+		t.Fatalf("retired candidates = %+v err=%v", retired, err)
+	}
+	for _, fact := range retired {
+		if !strings.Contains(fact.StatusNote, `stone "pre-existing files"`) {
+			t.Fatalf("candidate #%d failure evidence = %q, want the stone named", fact.Seq, fact.StatusNote)
+		}
+	}
+}
+
 func writeSkillArtifact(t *testing.T, name, check string) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), name)
