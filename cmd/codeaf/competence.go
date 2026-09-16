@@ -22,11 +22,12 @@ func runCompetenceTo(args []string, output io.Writer, now time.Time) error {
 	flags := commandFlags("competence")
 	database := flags.String("db", defaultChatDB(), storeFlagHelp)
 	modelFlag := flags.String("model", "", "working model whose profile buckets to include")
+	htmlFlag := flags.String("html", "", "write an interactive skill atlas to this path instead of the text report")
 	if err := parseCommandFlags(flags, reorder(flags, args)); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("usage: codeaf competence [--db path] [--model slug]")
+		return fmt.Errorf("usage: codeaf competence [--db path] [--model slug] [--html path]")
 	}
 	path, err := expandHome(strings.TrimSpace(*database))
 	if err != nil {
@@ -51,7 +52,27 @@ func runCompetenceTo(args []string, output io.Writer, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	if atlasPath := strings.TrimSpace(*htmlFlag); atlasPath != "" {
+		return writeCompetenceAtlas(output, competence, now, atlasPath)
+	}
 	return writeCompetence(output, competence, now)
+}
+
+// writeCompetenceAtlas is --html's whole job: render the same CompetenceMap
+// the text report reads, to disk, and say where. It never touches the store
+// again and never falls back to the text report — an explicit destination
+// asked for a file, not a second thing on the terminal.
+func writeCompetenceAtlas(output io.Writer, competence store.CompetenceMap, now time.Time, path string) error {
+	path, err := expandHome(path)
+	if err != nil {
+		return err
+	}
+	page := renderCompetenceAtlas(competence, now)
+	if err := os.WriteFile(path, []byte(page), 0o644); err != nil {
+		return fmt.Errorf("write skill atlas: %w", err)
+	}
+	_, err = fmt.Fprintf(output, "skill atlas written to %s\n", path)
+	return err
 }
 
 func measureCompetence(graph *store.Store, profileDir, model string, now time.Time) (store.CompetenceMap, error) {

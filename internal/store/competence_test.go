@@ -170,6 +170,35 @@ func TestCompetenceSkillScopeTouchingUsesPathHierarchy(t *testing.T) {
 	}
 }
 
+func TestRankSkillsOrdersByClassThenSuccessRateThenSamples(t *testing.T) {
+	competence := CompetenceMap{Scopes: []ScopeCompetence{
+		{Scope: "domain:publishing", Kind: CompetenceTerritory, Class: CompetenceWeak,
+			Samples: 10, SuccessRate: .2, InstalledSkills: []string{"failing-publisher"}},
+		{Scope: "tool:go", Kind: CompetenceTerritory, Class: CompetenceStrong,
+			Samples: 8, SuccessRate: .9, InstalledSkills: []string{"go-parser-fix"}},
+		{Scope: "tool:ffmpeg", Kind: CompetenceTerritory, Class: CompetenceStrong,
+			Samples: 20, SuccessRate: .9, InstalledSkills: []string{"transcode"}},
+		{Scope: "domain:archive", Kind: CompetenceTerritory, Class: CompetenceStale,
+			Samples: 4, SuccessRate: .5, InstalledSkills: []string{"old-archiver"}},
+		{Scope: "tool:git", Kind: CompetenceTerritory, Class: CompetenceFrontier,
+			Samples: 6, SuccessRate: .5, InstalledSkills: []string{"git-cleanup"}},
+		// No installed skills: must not appear in the ranking at all.
+		{Scope: "tool:curl", Kind: CompetenceTerritory, Class: CompetenceStrong, Samples: 5, SuccessRate: 1},
+	}}
+	ranked := competence.RankSkills()
+	var scopes []string
+	for _, rank := range ranked {
+		scopes = append(scopes, rank.Scope)
+	}
+	want := []string{"tool:ffmpeg", "tool:go", "tool:git", "domain:archive", "domain:publishing"}
+	if !reflect.DeepEqual(scopes, want) {
+		t.Fatalf("ranked scopes = %v, want %v", scopes, want)
+	}
+	if ranked[0].Samples != 20 || !reflect.DeepEqual(ranked[0].Skills, []string{"transcode"}) {
+		t.Fatalf("top rank = %+v", ranked[0])
+	}
+}
+
 func competenceProfileRecords(bucket string, at time.Time, failures int, surprises []float64) []profile.Record {
 	records := make([]profile.Record, profile.MinSamples)
 	for index := range records {

@@ -68,6 +68,79 @@ type CompetenceMap struct {
 	Scopes []ScopeCompetence `json:"scopes"`
 }
 
+// SkillRank is one scope's worth of installed skills, ordered by the same
+// execution-verified evidence CompetenceMap already carries — not by uses or
+// recency (Fact.Uses/LastUsed are explicitly retrieval telemetry, never a
+// ranking signal, per the field's own doc comment). No outcome is currently
+// attributed to one skill within a scope rather than another sharing it, so
+// Skills within a rank are not themselves ordered — only which scope's
+// skills to trust more than another's is real evidence today.
+type SkillRank struct {
+	Scope       string          `json:"scope"`
+	Kind        ScopeKind       `json:"kind"`
+	Class       CompetenceClass `json:"class"`
+	Samples     int             `json:"samples"`
+	SuccessRate float64         `json:"success_rate"`
+	Skills      []string        `json:"skills"`
+}
+
+// classPreference orders a scope's trustworthiness for skill selection.
+// Strong leads on settled, low-failure evidence; frontier next because it
+// still carries live signal even if mixed; stale ranks ahead of weak because
+// idleness is not the same claim as measured, current failure — a weak scope
+// is actively earning its failure rate today.
+func classPreference(class CompetenceClass) int {
+	switch class {
+	case CompetenceStrong:
+		return 0
+	case CompetenceFrontier:
+		return 1
+	case CompetenceStale:
+		return 2
+	case CompetenceWeak:
+		return 3
+	default:
+		return 4
+	}
+}
+
+// RankSkills is the small statistical model the resident's own docs call for
+// (LEARNING.md 3.3: "the contract writer consumes skills") — no embeddings,
+// no model call, just the failure-rate evidence the competence map already
+// derived from the journal, ordered so a scope with settled, low-failure
+// history outranks one that is frontier, stale, or actively failing. It is a
+// pure reshape of m.Scopes; it reads nothing new and writes nothing.
+func (m CompetenceMap) RankSkills() []SkillRank {
+	ranked := make([]SkillRank, 0, len(m.Scopes))
+	for _, scope := range m.Scopes {
+		if len(scope.InstalledSkills) == 0 {
+			continue
+		}
+		ranked = append(ranked, SkillRank{
+			Scope:       scope.Scope,
+			Kind:        scope.Kind,
+			Class:       scope.Class,
+			Samples:     scope.Samples,
+			SuccessRate: scope.SuccessRate,
+			Skills:      append([]string(nil), scope.InstalledSkills...),
+		})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		left, right := ranked[i], ranked[j]
+		if pi, pj := classPreference(left.Class), classPreference(right.Class); pi != pj {
+			return pi < pj
+		}
+		if left.SuccessRate != right.SuccessRate {
+			return left.SuccessRate > right.SuccessRate
+		}
+		if left.Samples != right.Samples {
+			return left.Samples > right.Samples
+		}
+		return left.Scope < right.Scope
+	})
+	return ranked
+}
+
 // Frontier returns an independent, stable list of scopes in the learnable
 // band. A future practice loop can consume it without depending on SQL,
 // territory layout, profile files, or classification logic.
@@ -482,6 +555,16 @@ func meanFloat(values []float64) float64 {
 		total += value
 	}
 	return total / float64(len(values))
+}
+
+// ScopesTouch is the exported form of the touching rule addTerritoryCompetence
+// already uses to match an active skill's declared scope against the
+// territory it counts evidence for. Exported so a second reader — the skill
+// atlas, the future contract writer (docs/LEARNING.md 3.3) — clusters scopes
+// by the one rule the competence map itself trusts, instead of a second,
+// silently-diverging notion of "these are related."
+func ScopesTouch(first, second string) bool {
+	return scopesTouch(first, second)
 }
 
 func scopesTouch(first, second string) bool {
